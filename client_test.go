@@ -4997,3 +4997,308 @@ func handleTestServerConnection(connection net.Conn, t *testing.T, props *server
 		}
 	}
 }
+
+// envelopeTestServer is a minimal SMTP test server that counts RCPT TO commands
+// and captures the message DATA content for envelope/Header verification.
+type envelopeTestServer struct {
+	rcptCount  int
+	mu         sync.Mutex
+	echoBuffer *bytes.Buffer
+}
+
+func (s *envelopeTestServer) handleConnection(conn net.Conn) {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
+	writeLine := func(data string) {
+		_, _ = writer.WriteString(data + "\r\n")
+		_ = writer.Flush()
+	}
+	writeLine("220 go-mail envelope test server ready ESMTP")
+	for {
+		data, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		data = strings.TrimSpace(data)
+		switch {
+		case strings.HasPrefix(data, "EHLO"), strings.HasPrefix(data, "HELO"):
+			writeLine("250-localhost.localdomain\r\n250 8BITMIME")
+		case strings.HasPrefix(data, "MAIL FROM:"):
+			writeLine("250 2.0.0 OK")
+		case strings.HasPrefix(data, "RCPT TO:"):
+			s.mu.Lock()
+			s.rcptCount++
+			s.mu.Unlock()
+			writeLine("250 2.0.0 OK")
+		case strings.EqualFold(data, "DATA"):
+			writeLine("354 End data with <CR><LF>.<CR><LF>")
+			for {
+				ddata, derr := reader.ReadString('\n')
+				if derr != nil {
+					return
+				}
+				if s.echoBuffer != nil {
+					s.mu.Lock()
+					_, _ = s.echoBuffer.Write([]byte(ddata))
+					s.mu.Unlock()
+				}
+				if strings.TrimSpace(ddata) == "." {
+					writeLine("250 2.0.0 Ok: queued")
+					break
+				}
+			}
+		case strings.EqualFold(data, "RSET"):
+			writeLine("250 2.0.0 OK")
+		case strings.EqualFold(data, "QUIT"):
+			writeLine("221 2.0.0 Bye")
+			return
+		default:
+			writeLine("250 2.0.0 OK")
+		}
+	}
+}
+
+func (s *envelopeTestServer) start(ctx context.Context, t *testing.T, port int) {
+	t.Helper()
+	listener, err := net.Listen(TestServerProto, fmt.Sprintf("%s:%d", TestServerAddr, port))
+	if err != nil {
+		t.Fatalf("failed to listen: %s", err)
+	}
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go s.handleConnection(conn)
+		}
+	}()
+}
+
+func TestClient_EnvelopeRecipients(t *testing.T) {
+	t.Run("To and Bcc same address only send once", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		PortAdder.Add(1)
+		serverPort := int(TestServerPortBase + PortAdder.Load())
+		srv := &envelopeTestServer{}
+		srv.start(ctx, t, serverPort)
+		time.Sleep(time.Millisecond * 30)
+
+		client, err := NewClient(DefaultHost, WithPort(serverPort), WithTLSPolicy(NoTLS))
+		if err != nil {
+			t.Fatalf("failed to create client: %s", err)
+		}
+		if err := client.DialWithContext(ctx); err != nil {
+			t.Fatalf("failed to dial: %s", err)
+		}
+		defer client.Close()
+
+		message := NewMsg()
+		if err := message.From("sender@example.com"); err != nil {
+			t.Fatalf("failed to set from: %s", err)
+		}
+		if err := message.To("toni@example.com"); err != nil {
+			t.Fatalf("failed to set to: %s", err)
+		}
+		if err := message.Bcc("toni@example.com"); err != nil {
+			t.Fatalf("failed to set bcc: %s", err)
+		}
+		message.Subject("test")
+		message.SetBodyString(TypeTextPlain, "test")
+
+		if err := client.Send(message); err != nil {
+			t.Fatalf("failed to send: %s", err)
+		}
+		srv.mu.Lock()
+		count := srv.rcptCount
+		srv.mu.Unlock()
+		if count != 1 {
+			t.Errorf("expected 1 RCPT TO command (dedup), got: %d", count)
+		}
+	})
+
+	t.Run("public Header has no Bcc", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		PortAdder.Add(1)
+		serverPort := int(TestServerPortBase + PortAdder.Load())
+		echoBuffer := bytes.NewBuffer(nil)
+		srv := &envelopeTestServer{echoBuffer: echoBuffer}
+		srv.start(ctx, t, serverPort)
+		time.Sleep(time.Millisecond * 30)
+
+		client, err := NewClient(DefaultHost, WithPort(serverPort), WithTLSPolicy(NoTLS))
+		if err != nil {
+			t.Fatalf("failed to create client: %s", err)
+		}
+		if err := client.DialWithContext(ctx); err != nil {
+			t.Fatalf("failed to dial: %s", err)
+		}
+		defer client.Close()
+
+		message := NewMsg()
+		if err := message.From("sender@example.com"); err != nil {
+			t.Fatalf("failed to set from: %s", err)
+		}
+		if err := message.To("to@example.com"); err != nil {
+			t.Fatalf("failed to set to: %s", err)
+		}
+		if err := message.Cc("cc@example.com"); err != nil {
+			t.Fatalf("failed to set cc: %s", err)
+		}
+		if err := message.Bcc("bcc@example.com"); err != nil {
+			t.Fatalf("failed to set bcc: %s", err)
+		}
+		message.Subject("test")
+		message.SetBodyString(TypeTextPlain, "test")
+
+		if err := client.Send(message); err != nil {
+			t.Fatalf("failed to send: %s", err)
+		}
+		srv.mu.Lock()
+		content := echoBuffer.String()
+		srv.mu.Unlock()
+		if strings.Contains(content, "Bcc:") || strings.Contains(content, "bcc@") {
+			t.Errorf("Bcc leaked into public Header: %s", content)
+		}
+		if !strings.Contains(content, "To:") || !strings.Contains(content, "to@") {
+			t.Errorf("To header missing from public Header: %s", content)
+		}
+		if !strings.Contains(content, "Cc:") || !strings.Contains(content, "cc@") {
+			t.Errorf("Cc header missing from public Header: %s", content)
+		}
+	})
+
+	t.Run("invalid second address send count 0", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		PortAdder.Add(1)
+		serverPort := int(TestServerPortBase + PortAdder.Load())
+		srv := &envelopeTestServer{}
+		srv.start(ctx, t, serverPort)
+		time.Sleep(time.Millisecond * 30)
+
+		client, err := NewClient(DefaultHost, WithPort(serverPort), WithTLSPolicy(NoTLS))
+		if err != nil {
+			t.Fatalf("failed to create client: %s", err)
+		}
+		if err := client.DialWithContext(ctx); err != nil {
+			t.Fatalf("failed to dial: %s", err)
+		}
+		defer client.Close()
+
+		message := NewMsg()
+		if err := message.From("sender@example.com"); err != nil {
+			t.Fatalf("failed to set from: %s", err)
+		}
+		// Setting To with a valid and an invalid address must fail entirely
+		if err := message.To("valid@example.com", "not-an-email"); err == nil {
+			t.Fatalf("expected error when setting To with invalid address, got nil")
+		}
+		message.Subject("test")
+		message.SetBodyString(TypeTextPlain, "test")
+
+		// No recipients are set, so sending must fail and no RCPT TO must be issued
+		if err := client.Send(message); err == nil {
+			t.Fatalf("expected send to fail with no recipients, got nil")
+		}
+		srv.mu.Lock()
+		count := srv.rcptCount
+		srv.mu.Unlock()
+		if count != 0 {
+			t.Errorf("expected 0 RCPT TO commands with invalid address, got: %d", count)
+		}
+	})
+
+	t.Run("display name does not change email identity", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		PortAdder.Add(1)
+		serverPort := int(TestServerPortBase + PortAdder.Load())
+		srv := &envelopeTestServer{}
+		srv.start(ctx, t, serverPort)
+		time.Sleep(time.Millisecond * 30)
+
+		client, err := NewClient(DefaultHost, WithPort(serverPort), WithTLSPolicy(NoTLS))
+		if err != nil {
+			t.Fatalf("failed to create client: %s", err)
+		}
+		if err := client.DialWithContext(ctx); err != nil {
+			t.Fatalf("failed to dial: %s", err)
+		}
+		defer client.Close()
+
+		message := NewMsg()
+		if err := message.From("Sender Name <sender@example.com>"); err != nil {
+			t.Fatalf("failed to set from: %s", err)
+		}
+		if err := message.To("Toni Tester <toni@example.com>"); err != nil {
+			t.Fatalf("failed to set to: %s", err)
+		}
+		message.Subject("test")
+		message.SetBodyString(TypeTextPlain, "test")
+
+		if err := client.Send(message); err != nil {
+			t.Fatalf("failed to send: %s", err)
+		}
+		srv.mu.Lock()
+		count := srv.rcptCount
+		srv.mu.Unlock()
+		if count != 1 {
+			t.Errorf("expected 1 RCPT TO command, got: %d", count)
+		}
+	})
+
+	t.Run("four addresses across to cc bcc dedup", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		PortAdder.Add(1)
+		serverPort := int(TestServerPortBase + PortAdder.Load())
+		srv := &envelopeTestServer{}
+		srv.start(ctx, t, serverPort)
+		time.Sleep(time.Millisecond * 30)
+
+		client, err := NewClient(DefaultHost, WithPort(serverPort), WithTLSPolicy(NoTLS))
+		if err != nil {
+			t.Fatalf("failed to create client: %s", err)
+		}
+		if err := client.DialWithContext(ctx); err != nil {
+			t.Fatalf("failed to dial: %s", err)
+		}
+		defer client.Close()
+
+		message := NewMsg()
+		if err := message.From("sender@example.com"); err != nil {
+			t.Fatalf("failed to set from: %s", err)
+		}
+		// Four unique addresses: a, b (To), c (Cc), d (Bcc); a appears in both To and Bcc
+		if err := message.To("a@x.com", "b@x.com"); err != nil {
+			t.Fatalf("failed to set to: %s", err)
+		}
+		if err := message.Cc("c@x.com"); err != nil {
+			t.Fatalf("failed to set cc: %s", err)
+		}
+		if err := message.Bcc("a@x.com", "d@x.com"); err != nil {
+			t.Fatalf("failed to set bcc: %s", err)
+		}
+		message.Subject("test")
+		message.SetBodyString(TypeTextPlain, "test")
+
+		if err := client.Send(message); err != nil {
+			t.Fatalf("failed to send: %s", err)
+		}
+		srv.mu.Lock()
+		count := srv.rcptCount
+		srv.mu.Unlock()
+		// a@x.com is deduplicated, so 4 unique recipients: a, b, c, d
+		if count != 4 {
+			t.Errorf("expected 4 RCPT TO commands (dedup), got: %d", count)
+		}
+	})
+}

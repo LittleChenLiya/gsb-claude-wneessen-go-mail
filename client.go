@@ -1687,7 +1687,7 @@ func (c *Client) sendSingleMsg(client *smtp.Client, message *Msg) error {
 			enhancedStatusCode: enhancedStatusCode(err, escSupport),
 		}
 	}
-	rcpts, err := message.GetRecipients()
+	rcpts, err := message.GetEnvelopeRecipients()
 	if err != nil {
 		return &SendError{
 			Reason: ErrGetRcpts, errlist: []error{err}, isTemp: isTempError(err),

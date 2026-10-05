@@ -629,11 +629,11 @@ func (m *Msg) SetAddrHeader(header AddrHeader, values ...string) error {
 	}
 	var addresses []*mail.Address
 	for _, addrVal := range values {
-		address, err := mail.ParseAddress(addrVal)
+		parsed, err := mail.ParseAddressList(addrVal)
 		if err != nil {
 			return fmt.Errorf(errParseMailAddr, addrVal, err)
 		}
-		addresses = append(addresses, address)
+		addresses = append(addresses, parsed...)
 	}
 	switch header {
 	case HeaderFrom:
@@ -1631,6 +1631,52 @@ func (m *Msg) GetRecipients() ([]string, error) {
 			continue
 		}
 		for _, r := range addresses {
+			rcpts = append(rcpts, mailAddressStringWithoutName(*r))
+		}
+	}
+	if len(rcpts) <= 0 {
+		return rcpts, ErrNoRcptAddresses
+	}
+	return rcpts, nil
+}
+
+// GetEnvelopeRecipients returns the deduplicated list of envelope recipient addresses for the Msg.
+//
+// This method aggregates recipients from the "TO", "CC", and "BCC" headers and deduplicates them
+// by their canonical (case-insensitive) email address. The envelope recipients are the real
+// recipients of the message as used by the SMTP "RCPT TO" command, and are computed separately
+// from the display headers (which exclude "Bcc"). Duplicate canonical addresses are only included
+// once in the returned slice, while the original mail.Address values (including display names)
+// remain unchanged in the message headers for display purposes.
+//
+// Group syntax (e.g., "Group: a@x.com, b@y.com;") is expanded into individual addresses during
+// address parsing, so each member of a group is treated as a separate recipient.
+//
+// Returns:
+//   - A slice of strings containing the deduplicated envelope recipients' addresses and an error
+//     if applicable.
+//   - If there are no recipient addresses set, it will return an error indicating no recipient
+//     addresses are available.
+//
+// References:
+//   - https://datatracker.ietf.org/doc/html/rfc5322#section-3.6.3
+func (m *Msg) GetEnvelopeRecipients() ([]string, error) {
+	seen := make(map[string]struct{})
+	var rcpts []string
+	for _, addressType := range []AddrHeader{HeaderTo, HeaderCc, HeaderBcc} {
+		addresses, ok := m.addrHeader[addressType]
+		if !ok || len(addresses) == 0 {
+			continue
+		}
+		for _, r := range addresses {
+			if r == nil {
+				continue
+			}
+			canonical := strings.ToLower(r.Address)
+			if _, ok := seen[canonical]; ok {
+				continue
+			}
+			seen[canonical] = struct{}{}
 			rcpts = append(rcpts, mailAddressStringWithoutName(*r))
 		}
 	}

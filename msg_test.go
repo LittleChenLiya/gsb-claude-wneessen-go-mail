@@ -767,6 +767,27 @@ func TestMsg_SetAddrHeader(t *testing.T) {
 			})
 		}
 	})
+	t.Run("failed SetAddrHeader does not modify existing header", func(t *testing.T) {
+		message := NewMsg()
+		if err := message.SetAddrHeader(HeaderTo, "toni.tester@example.com"); err != nil {
+			t.Fatalf("failed to set initial to address: %s", err)
+		}
+		// Attempt to overwrite with an invalid address must fail and leave the original intact
+		if err := message.SetAddrHeader(HeaderTo, "not-an-email"); err == nil {
+			t.Fatalf("expected SetAddrHeader with invalid address to fail, got nil")
+		}
+		rcpts, err := message.GetRecipients()
+		if err != nil {
+			t.Fatalf("failed to get recipients after failed set: %s", err)
+		}
+		if len(rcpts) != 1 {
+			t.Fatalf("expected original recipient to remain unchanged, got: %d (%v)", len(rcpts), rcpts)
+		}
+		if !strings.EqualFold(rcpts[0], "<toni.tester@example.com>") {
+			t.Errorf("original recipient was modified. Want: %s, got: %s",
+				"<toni.tester@example.com>", rcpts[0])
+		}
+	})
 }
 
 func TestMsg_SetAddrHeaderFromMailAddress(t *testing.T) {
@@ -2916,6 +2937,120 @@ func TestMsg_GetRecipients(t *testing.T) {
 			t.Fatal("message is nil")
 		}
 		_, err := message.GetRecipients()
+		if err == nil {
+			t.Errorf("expected error, got nil")
+		}
+		if !errors.Is(err, ErrNoRcptAddresses) {
+			t.Errorf("expected ErrNoRcptAddresses, got: %s", err)
+		}
+	})
+}
+
+func TestMsg_GetEnvelopeRecipients(t *testing.T) {
+	t.Run("deduplicates to and bcc with same address", func(t *testing.T) {
+		message := NewMsg()
+		if err := message.To("toni.tester@example.com"); err != nil {
+			t.Fatalf("failed to set to address: %s", err)
+		}
+		if err := message.Bcc("toni.tester@example.com"); err != nil {
+			t.Fatalf("failed to set bcc address: %s", err)
+		}
+		rcpts, err := message.GetEnvelopeRecipients()
+		if err != nil {
+			t.Fatalf("failed to get envelope recipients: %s", err)
+		}
+		if len(rcpts) != 1 {
+			t.Fatalf("expected 1 deduplicated recipient, got: %d (%v)", len(rcpts), rcpts)
+		}
+		if !strings.EqualFold(rcpts[0], "<toni.tester@example.com>") {
+			t.Errorf("expected recipient not returned. Want: %s, got: %s",
+				"<toni.tester@example.com>", rcpts[0])
+		}
+	})
+	t.Run("deduplicates case-insensitively with display names", func(t *testing.T) {
+		message := NewMsg()
+		if err := message.To("Toni Tester <toni.tester@example.com>"); err != nil {
+			t.Fatalf("failed to set to address: %s", err)
+		}
+		if err := message.Bcc("TONI TESTER <TONI.TESTER@EXAMPLE.COM>"); err != nil {
+			t.Fatalf("failed to set bcc address: %s", err)
+		}
+		rcpts, err := message.GetEnvelopeRecipients()
+		if err != nil {
+			t.Fatalf("failed to get envelope recipients: %s", err)
+		}
+		if len(rcpts) != 1 {
+			t.Fatalf("expected 1 deduplicated recipient, got: %d (%v)", len(rcpts), rcpts)
+		}
+	})
+	t.Run("display name does not change email identity", func(t *testing.T) {
+		message := NewMsg()
+		if err := message.To("Toni Tester <toni.tester@example.com>"); err != nil {
+			t.Fatalf("failed to set to address: %s", err)
+		}
+		if err := message.Cc("toni.tester@example.com"); err != nil {
+			t.Fatalf("failed to set cc address: %s", err)
+		}
+		rcpts, err := message.GetEnvelopeRecipients()
+		if err != nil {
+			t.Fatalf("failed to get envelope recipients: %s", err)
+		}
+		if len(rcpts) != 1 {
+			t.Fatalf("expected 1 deduplicated recipient, got: %d (%v)", len(rcpts), rcpts)
+		}
+		// The display name must not appear in the envelope recipient address
+		if strings.Contains(rcpts[0], "Toni") {
+			t.Errorf("display name leaked into envelope recipient: %s", rcpts[0])
+		}
+	})
+	t.Run("expands group syntax into individual addresses", func(t *testing.T) {
+		message := NewMsg()
+		if err := message.To("Team: a@x.com, b@y.com;"); err != nil {
+			t.Fatalf("failed to set to address with group: %s", err)
+		}
+		rcpts, err := message.GetEnvelopeRecipients()
+		if err != nil {
+			t.Fatalf("failed to get envelope recipients: %s", err)
+		}
+		if len(rcpts) != 2 {
+			t.Fatalf("expected 2 recipients from group, got: %d (%v)", len(rcpts), rcpts)
+		}
+		if !strings.EqualFold(rcpts[0], "<a@x.com>") {
+			t.Errorf("expected first recipient <a@x.com>, got: %s", rcpts[0])
+		}
+		if !strings.EqualFold(rcpts[1], "<b@y.com>") {
+			t.Errorf("expected second recipient <b@y.com>, got: %s", rcpts[1])
+		}
+	})
+	t.Run("four addresses across to cc bcc with dedup", func(t *testing.T) {
+		message := NewMsg()
+		if err := message.To("a@x.com", "b@x.com"); err != nil {
+			t.Fatalf("failed to set to addresses: %s", err)
+		}
+		if err := message.Cc("c@x.com"); err != nil {
+			t.Fatalf("failed to set cc address: %s", err)
+		}
+		if err := message.Bcc("a@x.com", "d@x.com"); err != nil {
+			t.Fatalf("failed to set bcc addresses: %s", err)
+		}
+		rcpts, err := message.GetEnvelopeRecipients()
+		if err != nil {
+			t.Fatalf("failed to get envelope recipients: %s", err)
+		}
+		// a@x.com appears in both To and Bcc, so dedup to 4 unique: a, b, c, d
+		if len(rcpts) != 4 {
+			t.Fatalf("expected 4 deduplicated recipients, got: %d (%v)", len(rcpts), rcpts)
+		}
+		expected := []string{"<a@x.com>", "<b@x.com>", "<c@x.com>", "<d@x.com>"}
+		for i, exp := range expected {
+			if !strings.EqualFold(rcpts[i], exp) {
+				t.Errorf("recipient %d: want %s, got %s", i, exp, rcpts[i])
+			}
+		}
+	})
+	t.Run("no recipients returns error", func(t *testing.T) {
+		message := NewMsg()
+		_, err := message.GetEnvelopeRecipients()
 		if err == nil {
 			t.Errorf("expected error, got nil")
 		}
