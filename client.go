@@ -1679,22 +1679,25 @@ func (c *Client) sendSingleMsg(client *smtp.Client, message *Msg) error {
 			return &SendError{Reason: ErrNoUnencoded, isTemp: false, affectedMsg: message}
 		}
 	}
-	from, err := message.GetSender(false)
+	// Compute the explicit envelope plan before any SMTP command is issued. The plan
+	// validates the sender and all recipient addresses (To, Cc and Bcc) and separates the
+	// public header addresses from the de-duplicated envelope recipients. If any address
+	// is invalid, the message is not sent at all and the Msg is left unmodified.
+	plan, err := message.EnvelopePlan()
 	if err != nil {
+		reason := ErrGetRcpts
+		var planErr *EnvelopePlanError
+		if errors.As(err, &planErr) && (planErr.Header == HeaderFrom || planErr.Header == HeaderEnvelopeFrom) {
+			reason = ErrGetSender
+		}
 		return &SendError{
-			Reason: ErrGetSender, errlist: []error{err}, isTemp: isTempError(err),
+			Reason: reason, errlist: []error{err}, isTemp: isTempError(err),
 			affectedMsg: message, errcode: errorCode(err),
 			enhancedStatusCode: enhancedStatusCode(err, escSupport),
 		}
 	}
-	rcpts, err := message.GetRecipients()
-	if err != nil {
-		return &SendError{
-			Reason: ErrGetRcpts, errlist: []error{err}, isTemp: isTempError(err),
-			affectedMsg: message, errcode: errorCode(err),
-			enhancedStatusCode: enhancedStatusCode(err, escSupport),
-		}
-	}
+	from := plan.Sender
+	rcpts := plan.RcptList()
 
 	if c.requestDSN {
 		if c.dsnReturnType != "" {

@@ -3575,8 +3575,10 @@ func TestClient_sendSingleMsg(t *testing.T) {
 		if !errors.As(err, &sendErr) {
 			t.Errorf("expected SendError, got %s", err)
 		}
-		if sendErr.Reason != ErrSMTPMailFrom {
-			t.Errorf("expected ErrSMTPMailFrom, got %s", sendErr.Reason)
+		// The envelope plan validates all addresses before any SMTP command is issued,
+		// hence an invalid sender address fails with ErrGetSender.
+		if sendErr.Reason != ErrGetSender {
+			t.Errorf("expected ErrGetSender, got %s", sendErr.Reason)
 		}
 	})
 	t.Run("fail with no sender address", func(t *testing.T) {
@@ -3857,8 +3859,10 @@ func TestClient_sendSingleMsg(t *testing.T) {
 		if !errors.As(err, &sendErr) {
 			t.Errorf("expected SendError, got %s", err)
 		}
-		if sendErr.Reason != ErrSMTPRcptTo {
-			t.Errorf("expected ErrSMTPRcptTo, got %s", sendErr.Reason)
+		// The envelope plan validates all addresses before any SMTP command is issued,
+		// hence an invalid recipient address fails with ErrGetRcpts and nothing is sent.
+		if sendErr.Reason != ErrGetRcpts {
+			t.Errorf("expected ErrGetRcpts, got %s", sendErr.Reason)
 		}
 	})
 	t.Run("connect and send email but fail on mail to and reset", func(t *testing.T) {
