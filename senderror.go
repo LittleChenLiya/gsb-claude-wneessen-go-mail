@@ -54,6 +54,10 @@ const (
 	// ErrAmbiguous is a generalized delivery error for the SendError type that is
 	// returned if the exact reason for the delivery failure is ambiguous
 	ErrAmbiguous
+
+	// ErrSnapshotCheck is returned if the pre-delivery verification of an attachment
+	// snapshot of the Msg failed. The message was not handed to the SMTP server.
+	ErrSnapshotCheck
 )
 
 // SendError is an error wrapper for delivery errors of the Msg.
@@ -85,7 +89,7 @@ type SendErrReason int
 // Returns:
 //   - A string representing the error message.
 func (e *SendError) Error() string {
-	if e.Reason > ErrAmbiguous {
+	if e.Reason > ErrSnapshotCheck {
 		return "unknown reason"
 	}
 
@@ -118,8 +122,19 @@ func (e *SendError) Error() string {
 	return errMessage.String()
 }
 
-// Is implements the errors.Is functionality and compares the SendErrReason.
+// Unwrap returns the list of underlying errors of the SendError, allowing errors.Is and
+// errors.As to inspect the wrapped delivery errors.
 //
+// Returns:
+//   - A slice of the underlying errors.
+func (e *SendError) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	return e.errlist
+}
+
+// Is implements the errors.Is functionality and compares the SendErrReason.//
 // This function allows for comparison between two errors by checking if the provided
 // error matches the SendError type and, if so, compares the SendErrReason and the
 // temporary status (isTemp) of both errors.
@@ -247,6 +262,8 @@ func (r SendErrReason) String() string {
 		return ErrServerNoUnencoded.Error()
 	case ErrAmbiguous:
 		return "ambiguous reason, check Msg.SendError for message specific reasons"
+	case ErrSnapshotCheck:
+		return "verifying attachment snapshots"
 	}
 	return "unknown reason"
 }

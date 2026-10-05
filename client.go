@@ -1679,6 +1679,17 @@ func (c *Client) sendSingleMsg(client *smtp.Client, message *Msg) error {
 			return &SendError{Reason: ErrNoUnencoded, isTemp: false, affectedMsg: message}
 		}
 	}
+
+	// Verify all attachment snapshots before the first SMTP command for this message is
+	// issued. A failed snapshot check must never hand an incomplete message to the SMTP
+	// server.
+	if err := message.verifyAttachmentSnapshots(); err != nil {
+		return &SendError{
+			Reason: ErrSnapshotCheck, errlist: []error{err}, isTemp: false,
+			affectedMsg: message, errcode: errorCode(err),
+			enhancedStatusCode: enhancedStatusCode(err, escSupport),
+		}
+	}
 	from, err := message.GetSender(false)
 	if err != nil {
 		return &SendError{

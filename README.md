@@ -59,6 +59,7 @@ Here are some highlights of go-mail's featureset:
 * [X] Support for common mail header field generation (Message-ID, Date, Bulk-Precedence, Priority, etc.)
 * [X] Concurrency-safe reusing the same SMTP connection to send multiple mails
 * [X] Support for attachments and inline embeds (from file system, `io.Reader`, `embed.FS` or `fs.FS`)
+* [X] Explicit attachment snapshots (`SnapshotFactory`/`AttachmentSnapshot`) that bind name and content in one build step: file-backed snapshots re-verify the on-disk identity (size, mtime, SHA-256) before anything is handed to the SMTP server, cached reader snapshots are replayable within a bounded total memory budget, and single-use reader snapshots fail explicitly on reuse instead of silently re-reading a consumed reader
 * [X] Support for different encodings
 * [X] Middleware support for 3rd-party libraries to alter mail messages
 * [X] Support sending mails via a local sendmail command

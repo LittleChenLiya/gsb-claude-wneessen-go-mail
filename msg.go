@@ -169,6 +169,12 @@ type Msg struct {
 	// sendError will hold an error of type SendError.
 	sendError error
 
+	// snapshots holds the attachment snapshots attached to the Msg via Msg.AttachSnapshot.
+	//
+	// The snapshots are verified before the Client hands the message to the SMTP server, so a
+	// failed snapshot check never results in an incomplete message being transmitted.
+	snapshots []*AttachmentSnapshot
+
 	// noDefaultUserAgent indicates whether the default User-Agent will be omitted for the Msg when it is
 	// being sent.
 	//
