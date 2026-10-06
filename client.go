@@ -5,6 +5,7 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -1735,6 +1736,29 @@ func (c *Client) sendSingleMsg(client *smtp.Client, message *Msg) error {
 		}
 		return rcptSendErr
 	}
+	// the Client is instructed to always DKIM sign the Msg, this will override the
+	// Msg's own DKIM configuration if set
+	if c.dkim != nil {
+		message.dkim = c.dkim
+	}
+
+	// Render the complete message into a buffer before the DATA transmission is
+	// started. If rendering fails (e.g. an attachment snapshot rejects its source
+	// or a one-shot attachment reader has already been consumed), no incomplete
+	// message is handed to the SMTP server.
+	var msgBuffer bytes.Buffer
+	if _, err = message.WriteTo(&msgBuffer); err != nil {
+		retError := &SendError{
+			Reason: ErrWriteContent, errlist: []error{err}, isTemp: isTempError(err),
+			affectedMsg: message, errcode: errorCode(err),
+			enhancedStatusCode: enhancedStatusCode(err, escSupport),
+		}
+		if resetSendErr := client.Reset(); resetSendErr != nil {
+			retError.errlist = append(retError.errlist, resetSendErr)
+		}
+		return retError
+	}
+
 	writer, err := client.Data()
 	if err != nil {
 		return &SendError{
@@ -1743,13 +1767,7 @@ func (c *Client) sendSingleMsg(client *smtp.Client, message *Msg) error {
 			enhancedStatusCode: enhancedStatusCode(err, escSupport),
 		}
 	}
-
-	// the Client is instructed to always DKIM sign the Msg, this will override the
-	// Msg's own DKIM configuration if set
-	if c.dkim != nil {
-		message.dkim = c.dkim
-	}
-	_, err = message.WriteTo(writer)
+	_, err = msgBuffer.WriteTo(writer)
 	if err != nil {
 		return &SendError{
 			Reason: ErrWriteContent, errlist: []error{err}, isTemp: isTempError(err),

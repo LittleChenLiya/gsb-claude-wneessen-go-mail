@@ -59,6 +59,8 @@ Here are some highlights of go-mail's featureset:
 * [X] Support for common mail header field generation (Message-ID, Date, Bulk-Precedence, Priority, etc.)
 * [X] Concurrency-safe reusing the same SMTP connection to send multiple mails
 * [X] Support for attachments and inline embeds (from file system, `io.Reader`, `embed.FS` or `fs.FS`)
+* [X] Explicit attachment snapshots with per-round identity verification, bounded in-memory caching and
+  replay-safe one-shot readers
 * [X] Support for different encodings
 * [X] Middleware support for 3rd-party libraries to alter mail messages
 * [X] Support sending mails via a local sendmail command
@@ -77,6 +79,40 @@ Here are some highlights of go-mail's featureset:
 
 go-mail works like a programmatic email client and provides lots of methods and functionalities you would consider
 standard in a MUA.
+
+## Attachment snapshots
+
+Next to the classic attachment methods (`AttachFile`, `AttachReader`, `AttachReadSeeker`, `AttachFromIOFS`, ...),
+go-mail provides explicit attachment snapshots via the `Snapshotter` factory. A snapshot binds an attachment's
+content source and its display name in a single build round:
+
+```go
+snapshotter := mail.NewSnapshotter(mail.WithSnapshotCacheLimit(32 << 20))
+
+// File-backed snapshot: records the file's identity (size, mtime, SHA-256).
+snapshot, err := snapshotter.SnapshotFile("/tmp/report.pdf")
+if err != nil { /* handle */ }
+
+msg := mail.NewMsg()
+// ... set FROM/TO/body ...
+if err := snapshot.AttachTo(msg); err != nil { /* file changed or vanished */ }
+```
+
+Key properties:
+
+* **Identity verification:** if a snapshotted file changes afterwards, building the snapshot is rejected with
+  `ErrSnapshotFileChanged`. Create a new snapshot via the `Snapshotter` to pick up new content explicitly.
+* **Bounded cache:** the total in-memory cache of a `Snapshotter` is capped (`WithSnapshotCacheLimit`). Small
+  content is cached for identical, replayable builds; large files are streamed from disk under identity
+  verification; oversized `io.Reader` content is refused with `ErrSnapshotCacheLimit` instead of being read
+  into memory without bounds.
+* **Replay safety:** `SnapshotReader` content can be replayed any number of times (e.g. by send retries).
+  `BindReader` creates a non-replayable one-shot attachment: a second use fails explicitly with
+  `ErrSnapshotConsumed` instead of silently reusing a consumed reader.
+* **Safe failures:** the client fully renders a message before the SMTP `DATA` phase, so a failing attachment
+  never delivers an incomplete message to the server.
+* **Names are not paths:** the display name of an attachment is sanitized and RFC 2047 encoded-word encoded
+  for the MIME headers. It is never interpreted as a file system path.
 
 ## Documentation / Examples
 
