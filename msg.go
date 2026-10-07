@@ -175,6 +175,11 @@ type Msg struct {
 	// This can be useful in scenarios where headers are conditionally passed based on receipt - i. e. SMTP proxies.
 	noDefaultUserAgent bool
 
+	// checkInlineCID indicates whether the "cid:" references in the HTML parts are checked against the
+	// embedded files of the Msg before any MIME output is generated. See CheckInlineCIDReferences for
+	// details. The check is disabled by default and can be enabled via WithInlineCIDCheck.
+	checkInlineCID bool
+
 	// sMIME holds a SMIME type to sign a Msg using S/MIME
 	sMIME *SMIME
 
@@ -387,6 +392,25 @@ func WithDKIM(signer *dkim.Signer) MsgOption {
 func WithNoDefaultUserAgent() MsgOption {
 	return func(m *Msg) {
 		m.noDefaultUserAgent = true
+	}
+}
+
+// WithInlineCIDCheck enables the pre-build validation of inline Content-ID references for the Msg.
+//
+// When enabled, the MIME output methods (such as WriteTo) run CheckInlineCIDReferences before any
+// MIME data is written. Every "cid:" reference found in an HTML part must point to exactly one
+// embedded file. Messages with a missing target (ErrInlineCIDMissingTarget) or with multiple
+// embedded files sharing the same referenced Content-ID (ErrInlineCIDDuplicateTarget) are rejected
+// before any MIME output is generated.
+//
+// The check is opt-in: a Msg created without this option is built without enforcing the inline cid
+// reference validation, preserving the default behavior.
+//
+// Returns:
+//   - A MsgOption function that enables the inline Content-ID reference check for the Msg instance.
+func WithInlineCIDCheck() MsgOption {
+	return func(m *Msg) {
+		m.checkInlineCID = true
 	}
 }
 
@@ -2374,8 +2398,15 @@ func (m *Msg) WriteToSkipMiddleware(writer io.Writer, middleWareType MiddlewareT
 		middlewares = append(middlewares, m.middlewares[i])
 	}
 	m.middlewares = middlewares
+	msg := m.applyMiddlewares(m)
+	if msg.checkInlineCID {
+		if err := msg.CheckInlineCIDReferences(); err != nil {
+			m.middlewares = origMiddlewares
+			return 0, err
+		}
+	}
 	mw := &msgWriter{writer: writer, charset: m.charset, encoder: m.encoder}
-	mw.writeMsg(m.applyMiddlewares(m))
+	mw.writeMsg(msg)
 	m.middlewares = origMiddlewares
 	return mw.bytesWritten, mw.err
 }
@@ -3155,6 +3186,14 @@ func (m *Msg) writeToInner(writer io.Writer) (int64, error) {
 
 	if m.hasSMIME() {
 		if err := m.signMessage(); err != nil {
+			return 0, err
+		}
+	}
+
+	// When the inline cid check is enabled, validate the "cid:" references of the HTML parts against
+	// the embedded files before any MIME data is written to the output.
+	if msg.checkInlineCID {
+		if err := msg.CheckInlineCIDReferences(); err != nil {
 			return 0, err
 		}
 	}
