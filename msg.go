@@ -114,6 +114,11 @@ type Msg struct {
 	// By default we set CharsetUTF8 for a Msg unless overridden by a corresponding MsgOption.
 	charset Charset
 
+	// cidCheck indicates whether the inline attachment Content-ID references of the HTML body
+	// parts are validated against the embedded files before any MIME output is generated.
+	// It is enabled via the WithCIDCheck MsgOption and is disabled by default.
+	cidCheck bool
+
 	// embeds contains a slice of File pointers representing the embedded files in a Msg.
 	embeds []*File
 
@@ -2374,8 +2379,15 @@ func (m *Msg) WriteToSkipMiddleware(writer io.Writer, middleWareType MiddlewareT
 		middlewares = append(middlewares, m.middlewares[i])
 	}
 	m.middlewares = middlewares
+	msg := m.applyMiddlewares(m)
+	if m.cidCheck {
+		if err := msg.checkCIDRefs(); err != nil {
+			m.middlewares = origMiddlewares
+			return 0, err
+		}
+	}
 	mw := &msgWriter{writer: writer, charset: m.charset, encoder: m.encoder}
-	mw.writeMsg(m.applyMiddlewares(m))
+	mw.writeMsg(msg)
 	m.middlewares = origMiddlewares
 	return mw.bytesWritten, mw.err
 }
@@ -3152,6 +3164,14 @@ func (m *Msg) signMessage() error {
 func (m *Msg) writeToInner(writer io.Writer) (int64, error) {
 	mw := &msgWriter{writer: writer, charset: m.charset, encoder: m.encoder}
 	msg := m.applyMiddlewares(m)
+
+	// Validate the inline attachment Content-ID references of the HTML body before any MIME
+	// output is generated. The check is opt-in via the WithCIDCheck MsgOption.
+	if m.cidCheck {
+		if err := msg.checkCIDRefs(); err != nil {
+			return 0, err
+		}
+	}
 
 	if m.hasSMIME() {
 		if err := m.signMessage(); err != nil {
