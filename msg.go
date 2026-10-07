@@ -2032,6 +2032,11 @@ func (m *Msg) AddAlternativeString(contentType ContentType, content string, opts
 // content to be written directly to the body. This is typically used to provide different formats, such
 // as plain text and HTML. Optional part settings can be provided via PartOption to customize the message part.
 //
+// By default, the alternative part is appended to the list of parts. If the WithAlternativeReplace
+// option is provided, the part instead replaces the first existing alternative part with the same
+// normalized media type, keeping the original position of the replaced part. The message body itself
+// is never replaced by this mechanism.
+//
 // Parameters:
 //   - contentType: The content type of the alternative body (e.g., plain text, HTML).
 //   - writeFunc: A function that writes content to an io.Writer and returns the number of bytes written and
@@ -2047,7 +2052,36 @@ func (m *Msg) AddAlternativeWriter(
 ) {
 	part := m.newPart(contentType, opts...)
 	part.writeFunc = writeFunc
+	if part.replaceAlternative {
+		mediaType := normalizeMediaType(part.contentType)
+		// The message body (first part) does not participate in alternative deduplication.
+		for i := 1; i < len(m.parts); i++ {
+			if normalizeMediaType(m.parts[i].contentType) == mediaType {
+				m.parts[i] = part
+				return
+			}
+		}
+	}
 	m.parts = append(m.parts, part)
+}
+
+// normalizeMediaType returns the normalized media type of the given ContentType.
+//
+// This function normalizes a ContentType for comparison purposes by stripping any content
+// parameters (e.g., charset), trimming surrounding whitespace and lowercasing the media type.
+// Content parameters are therefore compared separately from the media type itself.
+//
+// Parameters:
+//   - contentType: The ContentType to normalize.
+//
+// Returns:
+//   - The normalized media type as a string.
+func normalizeMediaType(contentType ContentType) string {
+	mediaType := string(contentType)
+	if index := strings.IndexByte(mediaType, ';'); index >= 0 {
+		mediaType = mediaType[:index]
+	}
+	return strings.ToLower(strings.TrimSpace(mediaType))
 }
 
 // AttachFile adds an attachment File to the Msg.

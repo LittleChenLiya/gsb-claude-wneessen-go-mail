@@ -5437,6 +5437,164 @@ func TestMsg_AddAlternativeWriter(t *testing.T) {
 	})
 }
 
+func TestMsg_AddAlternativeWriter_WithAlternativeReplace(t *testing.T) {
+	t.Run("replaces same normalized media type keeping position", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "body string")
+		message.AddAlternativeString(TypeTextPlain, "alternative plain")
+		message.AddAlternativeString(TypeTextHTML, "<p>alternative html v1</p>")
+		message.AddAlternativeString(TypeTextHTML, "<p>alternative html v2</p>",
+			WithAlternativeReplace(), WithPartCharset(CharsetUTF8))
+		parts := message.GetParts()
+		if len(parts) != 3 {
+			t.Fatalf("expected 3 parts, got: %d", len(parts))
+		}
+		if parts[0].contentType != TypeTextPlain {
+			t.Errorf("expected body contentType to be %s, got: %s", TypeTextPlain, parts[0].contentType)
+		}
+		if parts[1].contentType != TypeTextPlain {
+			t.Errorf("expected first alternative contentType to be %s, got: %s", TypeTextPlain,
+				parts[1].contentType)
+		}
+		if parts[2].contentType != TypeTextHTML {
+			t.Errorf("expected second alternative contentType to be %s, got: %s", TypeTextHTML,
+				parts[2].contentType)
+		}
+		if parts[2].charset != CharsetUTF8 {
+			t.Errorf("expected replaced alternative charset to be %s, got: %s", CharsetUTF8,
+				parts[2].charset)
+		}
+		messageBuf := bytes.NewBuffer(nil)
+		if _, err := parts[1].writeFunc(messageBuf); err != nil {
+			t.Errorf("writeFunc failed: %s", err)
+		}
+		if !strings.EqualFold(messageBuf.String(), "alternative plain") {
+			t.Errorf("expected first alternative to be %q, got: %q", "alternative plain",
+				messageBuf.String())
+		}
+		messageBuf.Reset()
+		if _, err := parts[2].writeFunc(messageBuf); err != nil {
+			t.Errorf("writeFunc failed: %s", err)
+		}
+		if !strings.EqualFold(messageBuf.String(), "<p>alternative html v2</p>") {
+			t.Errorf("expected replaced alternative to be %q, got: %q", "<p>alternative html v2</p>",
+				messageBuf.String())
+		}
+	})
+	t.Run("replaces content type with charset parameter", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "body string")
+		message.AddAlternativeString(TypeTextHTML, "<p>alternative html v1</p>")
+		message.AddAlternativeString(ContentType("text/html; charset=ISO-8859-1"),
+			"<p>alternative html v2</p>", WithAlternativeReplace())
+		parts := message.GetParts()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got: %d", len(parts))
+		}
+		messageBuf := bytes.NewBuffer(nil)
+		if _, err := parts[1].writeFunc(messageBuf); err != nil {
+			t.Errorf("writeFunc failed: %s", err)
+		}
+		if !strings.EqualFold(messageBuf.String(), "<p>alternative html v2</p>") {
+			t.Errorf("expected replaced alternative to be %q, got: %q", "<p>alternative html v2</p>",
+				messageBuf.String())
+		}
+	})
+	t.Run("does not replace different media type", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "body string")
+		message.AddAlternativeString(TypeTextPlain, "alternative plain")
+		message.AddAlternativeString(TypeTextHTML, "<p>alternative html</p>", WithAlternativeReplace())
+		parts := message.GetParts()
+		if len(parts) != 3 {
+			t.Fatalf("expected 3 parts, got: %d", len(parts))
+		}
+		if parts[2].contentType != TypeTextHTML {
+			t.Errorf("expected appended alternative contentType to be %s, got: %s", TypeTextHTML,
+				parts[2].contentType)
+		}
+	})
+	t.Run("does not replace message body", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "body string")
+		message.AddAlternativeString(TypeTextPlain, "alternative plain", WithAlternativeReplace())
+		parts := message.GetParts()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got: %d", len(parts))
+		}
+		messageBuf := bytes.NewBuffer(nil)
+		if _, err := parts[0].writeFunc(messageBuf); err != nil {
+			t.Errorf("writeFunc failed: %s", err)
+		}
+		if !strings.EqualFold(messageBuf.String(), "body string") {
+			t.Errorf("expected body to be %q, got: %q", "body string", messageBuf.String())
+		}
+	})
+	t.Run("default append behavior is preserved", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "body string")
+		message.AddAlternativeString(TypeTextHTML, "<p>alternative html v1</p>")
+		message.AddAlternativeString(TypeTextHTML, "<p>alternative html v2</p>")
+		parts := message.GetParts()
+		if len(parts) != 3 {
+			t.Fatalf("expected 3 parts, got: %d", len(parts))
+		}
+		if parts[1].contentType != TypeTextHTML || parts[2].contentType != TypeTextHTML {
+			t.Errorf("expected both alternatives to be %s, got: %s and %s", TypeTextHTML,
+				parts[1].contentType, parts[2].contentType)
+		}
+	})
+	t.Run("MIME order and content after replacement", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		if err := message.From("toni@example.com"); err != nil {
+			t.Fatalf("failed to set from address: %s", err)
+		}
+		if err := message.To("tina@example.com"); err != nil {
+			t.Fatalf("failed to set to address: %s", err)
+		}
+		message.Subject("Alternative replace")
+		message.SetBodyString(TypeTextPlain, "body string")
+		message.AddAlternativeString(TypeTextPlain, "alternative plain")
+		message.AddAlternativeString(TypeTextHTML, "<p>alternative html v1</p>")
+		message.AddAlternativeString(TypeTextHTML, "<p>alternative html v2</p>", WithAlternativeReplace())
+		messageBuf := bytes.NewBuffer(nil)
+		if _, err := message.WriteTo(messageBuf); err != nil {
+			t.Fatalf("WriteTo failed: %s", err)
+		}
+		eml := messageBuf.String()
+		bodyIndex := strings.Index(eml, "body string")
+		plainIndex := strings.Index(eml, "alternative plain")
+		htmlIndex := strings.Index(eml, "<p>alternative html v2</p>")
+		if bodyIndex < 0 || plainIndex < 0 || htmlIndex < 0 {
+			t.Fatalf("expected body and alternatives in message, got: %s", eml)
+		}
+		if !(bodyIndex < plainIndex && plainIndex < htmlIndex) {
+			t.Errorf("expected MIME order body < plain alternative < html alternative, got: %s", eml)
+		}
+		if strings.Contains(eml, "alternative html v1") {
+			t.Errorf("expected replaced content to be absent from message, got: %s", eml)
+		}
+	})
+}
+
 func TestMsg_AddAlternativeHTMLTemplate(t *testing.T) {
 	tplString := `<p>{{.teststring}}</p>`
 	invalidTplString := `<p>{{call $.invalid .teststring}}</p>`

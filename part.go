@@ -18,13 +18,14 @@ type PartOption func(*Part)
 // charset, optional description, encoding, and a function to write its content to an io.Writer.
 // It also includes a flag to mark the part as deleted.
 type Part struct {
-	contentType ContentType
-	charset     Charset
-	description string
-	encoding    Encoding
-	isDeleted   bool
-	writeFunc   func(io.Writer) (int64, error)
-	smime       bool
+	contentType        ContentType
+	charset            Charset
+	description        string
+	encoding           Encoding
+	isDeleted          bool
+	replaceAlternative bool
+	writeFunc          func(io.Writer) (int64, error)
+	smime              bool
 }
 
 // GetContent executes the WriteFunc of the Part and returns the content as a byte slice.
@@ -234,5 +235,24 @@ func WithPartContentDescription(description string) PartOption {
 func WithSMIMESigning() PartOption {
 	return func(p *Part) {
 		p.smime = true
+	}
+}
+
+// WithAlternativeReplace marks an alternative body part to replace an existing alternative
+// part of the same normalized media type instead of being appended.
+//
+// This function returns a PartOption that is only honored by the AddAlternative* methods of
+// Msg. When set, adding the alternative body part replaces the first existing alternative
+// part whose normalized media type (the content type without any content parameters such as
+// charset, compared case-insensitively) matches. The replacement keeps the original position
+// of the replaced part in the parts list and only overwrites that part. The message body (the
+// first part) never participates in this replacement. If no matching alternative part exists,
+// the part is appended as usual.
+//
+// Returns:
+//   - A PartOption that sets the alternative replacement flag to true.
+func WithAlternativeReplace() PartOption {
+	return func(p *Part) {
+		p.replaceAlternative = true
 	}
 }
