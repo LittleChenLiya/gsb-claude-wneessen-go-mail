@@ -25,6 +25,7 @@ type Part struct {
 	isDeleted   bool
 	writeFunc   func(io.Writer) (int64, error)
 	smime       bool
+	replace     bool
 }
 
 // GetContent executes the WriteFunc of the Part and returns the content as a byte slice.
@@ -234,5 +235,27 @@ func WithPartContentDescription(description string) PartOption {
 func WithSMIMESigning() PartOption {
 	return func(p *Part) {
 		p.smime = true
+	}
+}
+
+// WithPartReplace enables in-place replacement of an existing alternative body Part of the same
+// normalized media type.
+//
+// When this option is passed to Msg.AddAlternativeString or Msg.AddAlternativeWriter, the newly
+// added alternative part replaces the first existing alternative part whose media type matches,
+// keeping the original position of the replaced part in the MIME order. Content parameters (such
+// as the charset) are compared separately from the media type and are not part of the matching
+// key: an existing "text/html" part is replaced by a new "text/html" part regardless of the
+// charset either part uses. The main body of the message is never considered for replacement.
+// If no matching alternative part exists, the new part is appended as usual.
+//
+// This option has no effect on the main body parts created via Msg.SetBodyString or
+// Msg.SetBodyWriter.
+//
+// Returns:
+//   - A PartOption that sets the Part's replace flag to true.
+func WithPartReplace() PartOption {
+	return func(p *Part) {
+		p.replace = true
 	}
 }

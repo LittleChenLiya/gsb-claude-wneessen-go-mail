@@ -17,10 +17,12 @@ import (
 	ht "html/template"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net"
 	"net/mail"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -5435,6 +5437,443 @@ func TestMsg_AddAlternativeWriter(t *testing.T) {
 			t.Errorf("expected alternative message body to be %s, got: %s", "<p>alternative body</p>", messageBuf.String())
 		}
 	})
+}
+
+func TestMsg_AddAlternativeStringWithPartReplace(t *testing.T) {
+	t.Run("replace keeps MIME order and only overwrites same type", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "plain main body")
+		message.AddAlternativeString(TypeTextPlain, "plain alt v1")
+		message.AddAlternativeString(TypeTextHTML, "<p>html v1</p>")
+
+		// Replace the text/plain alternative in place.
+		message.AddAlternativeString(TypeTextPlain, "plain alt v2", WithPartReplace())
+		// Replace the text/html alternative in place.
+		message.AddAlternativeString(TypeTextHTML, "<p>html v2</p>", WithPartReplace())
+
+		parts := message.GetParts()
+		if len(parts) != 3 {
+			t.Fatalf("expected 3 parts, got: %d", len(parts))
+		}
+		expectedTypes := []ContentType{TypeTextPlain, TypeTextPlain, TypeTextHTML}
+		expectedContents := []string{"plain main body", "plain alt v2", "<p>html v2</p>"}
+		for i, part := range parts {
+			if part == nil {
+				t.Fatalf("expected part %d to be not nil", i)
+			}
+			if part.contentType != expectedTypes[i] {
+				t.Errorf("part %d: expected contentType %s, got: %s", i, expectedTypes[i],
+					part.contentType)
+			}
+			content, err := part.GetContent()
+			if err != nil {
+				t.Fatalf("part %d: failed to get content: %s", i, err)
+			}
+			if string(content) != expectedContents[i] {
+				t.Errorf("part %d: expected content %q, got: %q", i, expectedContents[i],
+					string(content))
+			}
+		}
+	})
+	t.Run("replace with charset parameter matches type but not params", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "main body")
+		message.AddAlternativeString(TypeTextPlain, "plain ascii alt",
+			WithPartCharset(CharsetASCII))
+		message.AddAlternativeString(TypeTextHTML, "<p>html alt</p>")
+
+		// Same media type, different charset: parameters are compared separately, so this must
+		// replace the existing text/plain alternative rather than append a third part.
+		message.AddAlternativeString(TypeTextPlain, "plain utf8 alt",
+			WithPartReplace(), WithPartCharset(CharsetUTF8))
+
+		parts := message.GetParts()
+		if len(parts) != 3 {
+			t.Fatalf("expected 3 parts, got: %d", len(parts))
+		}
+		plainAlt := parts[1]
+		if plainAlt.charset != CharsetUTF8 {
+			t.Errorf("expected replacement charset %s, got: %s", CharsetUTF8, plainAlt.charset)
+		}
+		content, err := plainAlt.GetContent()
+		if err != nil {
+			t.Fatalf("failed to get content: %s", err)
+		}
+		if string(content) != "plain utf8 alt" {
+			t.Errorf("expected replaced content %q, got: %q", "plain utf8 alt", string(content))
+		}
+	})
+	t.Run("replace never touches the main body", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "main body")
+
+		// The main body is text/plain and it is the only part. The replacement must not
+		// overwrite it; since no matching alternative exists, the new part is appended.
+		message.AddAlternativeString(TypeTextPlain, "alt body", WithPartReplace())
+
+		parts := message.GetParts()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got: %d", len(parts))
+		}
+		mainContent, err := parts[0].GetContent()
+		if err != nil {
+			t.Fatalf("failed to get main body content: %s", err)
+		}
+		if string(mainContent) != "main body" {
+			t.Errorf("expected main body to stay %q, got: %q", "main body", string(mainContent))
+		}
+		altContent, err := parts[1].GetContent()
+		if err != nil {
+			t.Fatalf("failed to get alternative content: %s", err)
+		}
+		if string(altContent) != "alt body" {
+			t.Errorf("expected appended alternative %q, got: %q", "alt body", string(altContent))
+		}
+	})
+	t.Run("replace without matching type appends", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "main body")
+		message.AddAlternativeString(TypeTextHTML, "<p>html alt</p>")
+		message.AddAlternativeString(ContentType("text/calendar"), "text/calendar alt",
+			WithPartReplace())
+
+		parts := message.GetParts()
+		if len(parts) != 3 {
+			t.Fatalf("expected 3 parts, got: %d", len(parts))
+		}
+		if parts[2].contentType != ContentType("text/calendar") {
+			t.Errorf("expected last part contentType %s, got: %s", "text/calendar",
+				parts[2].contentType)
+		}
+	})
+	t.Run("default behavior appends duplicate media types", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "main body")
+		message.AddAlternativeString(TypeTextPlain, "plain alt v1")
+		message.AddAlternativeString(TypeTextPlain, "plain alt v2")
+		message.AddAlternativeString(TypeTextHTML, "<p>html v1</p>")
+		message.AddAlternativeString(TypeTextHTML, "<p>html v2</p>")
+
+		parts := message.GetParts()
+		if len(parts) != 5 {
+			t.Fatalf("expected 5 parts with default append, got: %d", len(parts))
+		}
+		expectedContents := []string{
+			"main body", "plain alt v1", "plain alt v2", "<p>html v1</p>", "<p>html v2</p>",
+		}
+		for i, part := range parts {
+			content, err := part.GetContent()
+			if err != nil {
+				t.Fatalf("part %d: failed to get content: %s", i, err)
+			}
+			if string(content) != expectedContents[i] {
+				t.Errorf("part %d: expected %q, got: %q", i, expectedContents[i], string(content))
+			}
+		}
+	})
+}
+
+func TestMsg_AddAlternativeWriterWithPartReplace(t *testing.T) {
+	writerFunc := func(content string) func(io.Writer) (int64, error) {
+		return func(w io.Writer) (int64, error) {
+			n, err := w.Write([]byte(content))
+			return int64(n), err
+		}
+	}
+	t.Run("replace via writer normalizes media type casing", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyWriter(TypeTextPlain, writerFunc("main body"))
+		message.AddAlternativeWriter(ContentType("Text/HTML"), writerFunc("<p>html v1</p>"))
+
+		// Different casing and additional whitespace must still match the same media type.
+		message.AddAlternativeWriter(ContentType(" text/html "), writerFunc("<p>html v2</p>"),
+			WithPartReplace())
+
+		parts := message.GetParts()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got: %d", len(parts))
+		}
+		if parts[1].contentType != ContentType(" text/html ") {
+			t.Errorf("expected new part to keep given contentType value, got: %s",
+				parts[1].contentType)
+		}
+		content, err := parts[1].GetContent()
+		if err != nil {
+			t.Fatalf("failed to get content: %s", err)
+		}
+		if string(content) != "<p>html v2</p>" {
+			t.Errorf("expected replaced content %q, got: %q", "<p>html v2</p>", string(content))
+		}
+	})
+	t.Run("replace via writer with inline charset parameter matches base type", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "main body")
+		message.AddAlternativeString(TypeTextHTML, "<p>html v1</p>")
+		message.AddAlternativeWriter(ContentType("text/html; charset=ISO-8859-1"),
+			writerFunc("<p>html v2</p>"), WithPartReplace())
+
+		parts := message.GetParts()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 parts, got: %d", len(parts))
+		}
+		content, err := parts[1].GetContent()
+		if err != nil {
+			t.Fatalf("failed to get content: %s", err)
+		}
+		if string(content) != "<p>html v2</p>" {
+			t.Errorf("expected replaced content %q, got: %q", "<p>html v2</p>", string(content))
+		}
+	})
+}
+
+func TestMsg_AddAlternativePartReplaceMIMEOrder(t *testing.T) {
+	t.Run("replaced alternatives keep MIME order in written message", func(t *testing.T) {
+		message := NewMsg()
+		if message == nil {
+			t.Fatal("message is nil")
+		}
+		message.SetBodyString(TypeTextPlain, "plain main")
+		message.AddAlternativeString(TypeTextPlain, "plain v1")
+		message.AddAlternativeString(TypeTextHTML, "<p>html v1</p>")
+		message.AddAlternativeString(TypeTextHTML, "<p>html v2</p>", WithPartReplace())
+		message.AddAlternativeString(TypeTextPlain, "plain v2", WithPartReplace())
+
+		var buffer bytes.Buffer
+		if _, err := message.WriteTo(&buffer); err != nil {
+			t.Fatalf("failed to write message: %s", err)
+		}
+		raw := buffer.String()
+
+		plainPos := strings.Index(raw, "plain v2")
+		htmlPos := strings.Index(raw, "<p>html v2</p>")
+		if plainPos < 0 || htmlPos < 0 {
+			t.Fatalf("expected replaced contents in output, got:\n%s", raw)
+		}
+		if plainPos > htmlPos {
+			t.Errorf("expected text/plain alternative before text/html alternative")
+		}
+		if strings.Contains(raw, "plain v1") || strings.Contains(raw, "<p>html v1</p>") {
+			t.Errorf("expected replaced contents to be gone from output")
+		}
+
+		// Parse the multipart/alternative structure and verify the actual MIME part order.
+		entity, err := mail.ReadMessage(&buffer)
+		if err != nil {
+			t.Fatalf("failed to parse written message: %s", err)
+		}
+		mediaType, params, err := mime.ParseMediaType(entity.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("failed to parse top level content type: %s", err)
+		}
+		if mediaType != "multipart/alternative" {
+			t.Fatalf("expected multipart/alternative, got: %s", mediaType)
+		}
+		mr := multipart.NewReader(entity.Body, params["boundary"])
+		var partTypes []string
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("failed to read next multipart part: %s", err)
+			}
+			partMediaType, _, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+			if err != nil {
+				t.Fatalf("failed to parse part content type: %s", err)
+			}
+			partTypes = append(partTypes, partMediaType)
+		}
+		expectedPartTypes := []string{"text/plain", "text/plain", "text/html"}
+		if !reflect.DeepEqual(partTypes, expectedPartTypes) {
+			t.Errorf("expected MIME order %v, got: %v", expectedPartTypes, partTypes)
+		}
+	})
+}
+
+func TestMsg_AddAlternativePartReplaceAcceptanceFixture(t *testing.T) {
+	// writeEml renders the message and writes it to a small fixture file in the test's temp
+	// directory. The file is re-read and parsed so the test asserts on the actual on-disk MIME.
+	writeEml := func(t *testing.T, name string, message *Msg) (*mail.Message, string) {
+		t.Helper()
+		fixturePath := filepath.Join(t.TempDir(), name)
+		fixtureFile, err := os.Create(fixturePath)
+		if err != nil {
+			t.Fatalf("failed to create fixture file %s: %s", fixturePath, err)
+		}
+		defer func() { _ = fixtureFile.Close() }()
+		if _, err = message.WriteTo(fixtureFile); err != nil {
+			t.Fatalf("failed to write fixture file %s: %s", fixturePath, err)
+		}
+		t.Logf("fixture written to: %s", fixturePath)
+
+		readFile, err := os.Open(fixturePath)
+		if err != nil {
+			t.Fatalf("failed to open fixture file %s: %s", fixturePath, err)
+		}
+		defer func() { _ = readFile.Close() }()
+		entity, err := mail.ReadMessage(readFile)
+		if err != nil {
+			t.Fatalf("failed to parse fixture file %s: %s", fixturePath, err)
+		}
+		raw, err := os.ReadFile(fixturePath)
+		if err != nil {
+			t.Fatalf("failed to read fixture file %s: %s", fixturePath, err)
+		}
+		return entity, string(raw)
+	}
+
+	// partSummary extracts the MIME order and contents of a multipart/alternative message.
+	partSummary := func(t *testing.T, entity *mail.Message) []string {
+		t.Helper()
+		_, params, err := mime.ParseMediaType(entity.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("failed to parse content type: %s", err)
+		}
+		reader := multipart.NewReader(entity.Body, params["boundary"])
+		var summary []string
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("failed to read multipart part: %s", err)
+			}
+			partMediaType, partParams, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+			if err != nil {
+				t.Fatalf("failed to parse part content type: %s", err)
+			}
+			content, err := io.ReadAll(part)
+			if err != nil {
+				t.Fatalf("failed to read part content: %s", err)
+			}
+			summary = append(summary, fmt.Sprintf("%s; charset=%s => %q", partMediaType,
+				partParams["charset"], strings.TrimSpace(string(content))))
+		}
+		return summary
+	}
+
+	t.Run("replacement fixture: plain, html and charset variant", func(t *testing.T) {
+		message := NewMsg()
+		message.From("toni.sender@example.com")
+		message.To("tina.recipient@example.com")
+		message.Subject("Alternative part replacement")
+		message.SetBodyString(TypeTextPlain, "plain main body")
+		message.AddAlternativeString(TypeTextPlain, "plain alt US-ASCII",
+			WithPartCharset(CharsetASCII))
+		message.AddAlternativeString(TypeTextHTML, "<p>html v1</p>")
+		// Same media type but different charset: the charset parameter is compared separately,
+		// so this replaces the existing plain alternative in place.
+		message.AddAlternativeString(TypeTextPlain, "plain alt UTF-8",
+			WithPartReplace(), WithPartCharset(CharsetUTF8))
+		message.AddAlternativeString(TypeTextHTML, "<p>html v2</p>", WithPartReplace())
+
+		entity, raw := writeEml(t, "alternative-replace.eml", message)
+		summary := partSummary(t, entity)
+		expectedSummary := []string{
+			"text/plain; charset=UTF-8 => \"plain main body\"",
+			"text/plain; charset=UTF-8 => \"plain alt UTF-8\"",
+			"text/html; charset=UTF-8 => \"<p>html v2</p>\"",
+		}
+		if !reflect.DeepEqual(summary, expectedSummary) {
+			t.Errorf("expected MIME summary:\n%s\ngot:\n%s",
+				strings.Join(expectedSummary, "\n"), strings.Join(summary, "\n"))
+		}
+		if strings.Contains(raw, "plain alt US-ASCII") || strings.Contains(raw, "html v1") {
+			t.Errorf("expected replaced contents to be absent from fixture")
+		}
+		if !strings.Contains(raw, "multipart/alternative") {
+			t.Errorf("expected multipart/alternative MIME structure in fixture")
+		}
+	})
+
+	t.Run("default append fixture: duplicates are appended", func(t *testing.T) {
+		message := NewMsg()
+		message.From("toni.sender@example.com")
+		message.To("tina.recipient@example.com")
+		message.Subject("Alternative part default append")
+		message.SetBodyString(TypeTextPlain, "plain main body")
+		message.AddAlternativeString(TypeTextPlain, "plain alt US-ASCII",
+			WithPartCharset(CharsetASCII))
+		message.AddAlternativeString(TypeTextHTML, "<p>html v1</p>")
+		// Without WithPartReplace the charset variant and the HTML update are appended, leaving
+		// the original alternatives untouched.
+		message.AddAlternativeString(TypeTextPlain, "plain alt UTF-8",
+			WithPartCharset(CharsetUTF8))
+		message.AddAlternativeString(TypeTextHTML, "<p>html v2</p>")
+
+		entity, _ := writeEml(t, "alternative-append.eml", message)
+		summary := partSummary(t, entity)
+		expectedSummary := []string{
+			"text/plain; charset=UTF-8 => \"plain main body\"",
+			"text/plain; charset=US-ASCII => \"plain alt US-ASCII\"",
+			"text/html; charset=UTF-8 => \"<p>html v1</p>\"",
+			"text/plain; charset=UTF-8 => \"plain alt UTF-8\"",
+			"text/html; charset=UTF-8 => \"<p>html v2</p>\"",
+		}
+		if !reflect.DeepEqual(summary, expectedSummary) {
+			t.Errorf("expected MIME summary:\n%s\ngot:\n%s",
+				strings.Join(expectedSummary, "\n"), strings.Join(summary, "\n"))
+		}
+	})
+}
+
+func Test_normalizeMediaType(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		mediaType  string
+		shouldHave bool
+		paramKey   string
+		paramVal   string
+	}{
+		{"plain", "text/plain", "text/plain", false, "", ""},
+		{"upper case", "Text/HTML", "text/html", false, "", ""},
+		{"whitespace", "  text/calendar  ", "text/calendar", false, "", ""},
+		{"charset param", `text/plain; charset=UTF-8`, "text/plain", true, "charset", "UTF-8"},
+		{"multiple params", `text/html; charset=ISO-8859-1; format=flowed`, "text/html", true,
+			"format", "flowed"},
+		{"invalid falls back", "!!!not-a-type!!!", "!!!not-a-type!!!", false, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mediaType, params := normalizeMediaType(tt.input)
+			if mediaType != tt.mediaType {
+				t.Errorf("expected media type %q, got: %q", tt.mediaType, mediaType)
+			}
+			if tt.shouldHave {
+				if params == nil {
+					t.Fatalf("expected params to be set")
+				}
+				if params[tt.paramKey] != tt.paramVal {
+					t.Errorf("expected param %s=%s, got: %s", tt.paramKey, tt.paramVal,
+						params[tt.paramKey])
+				}
+			}
+		})
+	}
 }
 
 func TestMsg_AddAlternativeHTMLTemplate(t *testing.T) {

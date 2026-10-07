@@ -2010,7 +2010,9 @@ func (m *Msg) SetBodyWriter(
 //
 // This method adds an alternative representation of the message body using the specified content type
 // and string content. This is typically used to provide both plain text and HTML versions of the email.
-// Optional part settings can be provided via PartOption to further customize the message.
+// Optional part settings can be provided via PartOption to further customize the message. The
+// WithPartReplace option can be used to replace an existing alternative part of the same normalized
+// media type in place instead of appending a new one; see AddAlternativeWriter for details.
 //
 // Parameters:
 //   - contentType: The content type of the alternative body (e.g., plain text, HTML).
@@ -2032,6 +2034,14 @@ func (m *Msg) AddAlternativeString(contentType ContentType, content string, opts
 // content to be written directly to the body. This is typically used to provide different formats, such
 // as plain text and HTML. Optional part settings can be provided via PartOption to customize the message part.
 //
+// By default, the new alternative part is appended to the existing parts. Passing the WithPartReplace
+// PartOption changes this behavior: instead of appending, the new part replaces the first existing
+// alternative part with the same normalized media type in place, preserving the original MIME order.
+// Content parameters such as the charset are parsed separately from the media type and do not
+// participate in the matching, so a "text/plain; charset=UTF-8" part and a "text/plain" part are
+// considered to be of the same type. The main body of the message is never replaced. If no alternative
+// part of the same media type exists, the new part is appended even when WithPartReplace is used.
+//
 // Parameters:
 //   - contentType: The content type of the alternative body (e.g., plain text, HTML).
 //   - writeFunc: A function that writes content to an io.Writer and returns the number of bytes written and
@@ -2047,7 +2057,65 @@ func (m *Msg) AddAlternativeWriter(
 ) {
 	part := m.newPart(contentType, opts...)
 	part.writeFunc = writeFunc
+	if part.replace {
+		part.replace = false
+		if idx := m.findAlternativePart(contentType); idx >= 0 {
+			m.parts[idx] = part
+			return
+		}
+	}
 	m.parts = append(m.parts, part)
+}
+
+// findAlternativePart returns the index of the first alternative body part whose normalized media
+// type matches the given content type.
+//
+// The main body of the message, which is always the first part, is excluded from the search. Only
+// active (not deleted and not S/MIME specific) alternative parts are considered. The media type is
+// normalized to its lower-case base type without content parameters via normalizeMediaType, so the
+// charset or other parameters of either part do not affect the match.
+//
+// Parameters:
+//   - contentType: The ContentType whose normalized media type the matching part must have.
+//
+// Returns:
+//   - The index of the matching alternative part, or -1 if no such part exists.
+func (m *Msg) findAlternativePart(contentType ContentType) int {
+	wantedType, _ := normalizeMediaType(contentType.String())
+	for idx := 1; idx < len(m.parts); idx++ {
+		part := m.parts[idx]
+		if part == nil || part.isDeleted || part.smime {
+			continue
+		}
+		currentType, _ := normalizeMediaType(part.contentType.String())
+		if currentType != "" && currentType == wantedType {
+			return idx
+		}
+	}
+	return -1
+}
+
+// normalizeMediaType parses the given content type and returns its normalized base media type with
+// all content parameters stripped.
+//
+// The content type is parsed as described in RFC 2045, separating the media type from its parameters
+// (such as the charset or boundary). The returned media type is converted to lower case and has
+// surrounding whitespace removed, which allows comparing equivalent media types regardless of their
+// original casing or parameters. If the content type cannot be parsed, the trimmed and lower-cased
+// raw value is returned as a fallback.
+//
+// Parameters:
+//   - contentType: The raw content type value to normalize.
+//
+// Returns:
+//   - The normalized base media type without parameters.
+//   - The content parameters parsed from the content type, if any.
+func normalizeMediaType(contentType string) (string, map[string]string) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(contentType)), nil
+	}
+	return strings.ToLower(strings.TrimSpace(mediaType)), params
 }
 
 // AttachFile adds an attachment File to the Msg.

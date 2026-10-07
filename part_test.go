@@ -120,6 +120,34 @@ func TestPart_WithSMimeSinging(t *testing.T) {
 	}
 }
 
+// TestPart_WithPartReplace tests the WithPartReplace method
+func TestPart_WithPartReplace(t *testing.T) {
+	t.Run("WithPartReplace sets the replace flag", func(t *testing.T) {
+		m := NewMsg()
+		part := m.newPart(TypeTextPlain, WithPartReplace())
+		if part == nil {
+			t.Errorf("newPart() WithPartReplace() failed: no part returned")
+			return
+		}
+		if !part.replace {
+			t.Errorf("newPart() WithPartReplace() failed: expected: %v, got: %v", true,
+				part.replace)
+		}
+	})
+	t.Run("new parts default to no replace", func(t *testing.T) {
+		m := NewMsg()
+		part := m.newPart(TypeTextPlain)
+		if part == nil {
+			t.Errorf("newPart() failed: no part returned")
+			return
+		}
+		if part.replace {
+			t.Errorf("newPart() failed: expected replace to default to %v, got: %v", false,
+				part.replace)
+		}
+	})
+}
+
 // TestPartContentType tests Part.SetContentType
 func TestPart_SetContentType(t *testing.T) {
 	tests := []struct {
